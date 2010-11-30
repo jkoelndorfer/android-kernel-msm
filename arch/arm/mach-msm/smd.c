@@ -19,11 +19,13 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/kfifo.h>
 #include <linux/wait.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/list.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <asm/arch/msm_smd.h>
@@ -45,8 +47,26 @@ module_param_named(debug_mask, msm_smd_debug_mask, int, S_IRUGO | S_IWUSR | S_IW
 
 void *smem_find(unsigned id, unsigned size);
 void smd_diag(void);
+struct smd_channel *smd_get_channel(const char *name);
+struct smd_channel *smd_find_channel(const char *name);
 
 static unsigned last_heap_free = 0xffffffff;
+
+#define CELLNET_BUF_START "\n--------------------\n"
+#define CELLNET_BUF_END "\n--------------------\n"
+#define CELLNET_READ_NOTIFY "READ FROM "
+#define CELLNET_WRITE_NOTIFY "WROTE TO "
+static int msm_cellnet_open(struct inode *, struct file *);
+static int msm_cellnet_release(struct inode *, struct file *);
+static ssize_t msm_cellnet_read(struct file *, char *, size_t, loff_t *);
+static ssize_t msm_cellnet_write(struct file *, const char *, size_t, loff_t *);
+
+static struct file_operations fops = {
+	.read = msm_cellnet_read,
+	.write = msm_cellnet_write,
+	.open = msm_cellnet_open,
+	.release = msm_cellnet_release
+};
 
 #if 0
 #define D(x...) printk(x)
@@ -190,6 +210,8 @@ struct smd_channel
 
 	char name[32];
 	struct platform_device pdev;
+	struct kfifo *chardev_buf;
+	int chardev_major;
 };
 
 static LIST_HEAD(smd_ch_closed_list);
@@ -315,6 +337,11 @@ static int ch_read(struct smd_channel *ch, void *_data, int len)
 		if (_data)
 			memcpy(data, ptr, n);
 
+		kfifo_put(ch->chardev_buf, CELLNET_READ_NOTIFY, strlen(CELLNET_READ_NOTIFY));
+		kfifo_put(ch->chardev_buf, ch->name, strlen(ch->name));
+		kfifo_put(ch->chardev_buf, CELLNET_BUF_START, strlen(CELLNET_BUF_START));
+		kfifo_put(ch->chardev_buf, ptr, n);
+		kfifo_put(ch->chardev_buf, CELLNET_BUF_END, strlen(CELLNET_BUF_END));
 		data += n;
 		len -= n;
 		ch_read_done(ch, n);
@@ -567,18 +594,23 @@ static int smd_stream_write(smd_channel_t *ch, const void *_data, int len)
 	D("smd_stream_write() %d -> ch%d\n", len, ch->n);
 	if (len < 0) return -EINVAL;
 
+	kfifo_put(ch->chardev_buf, CELLNET_WRITE_NOTIFY, strlen(CELLNET_WRITE_NOTIFY));
+	kfifo_put(ch->chardev_buf, ch->name, strlen(ch->name));
+	kfifo_put(ch->chardev_buf, CELLNET_BUF_START, strlen(CELLNET_BUF_START));
 	while ((xfer = ch_write_buffer(ch, &ptr)) != 0) {
 		if (!ch_is_open(ch))
 			break;
 		if (xfer > len)
 			xfer = len;
 		memcpy(ptr, buf, xfer);
+		kfifo_put(ch->chardev_buf, buf, xfer);
 		ch_write_done(ch, xfer);
 		len -= xfer;
 		buf += xfer;
 		if (len == 0)
 			break;
 	}
+	kfifo_put(ch->chardev_buf, CELLNET_BUF_END, strlen(CELLNET_BUF_END));
 
 	notify_other_smd();
 
@@ -643,6 +675,7 @@ static void smd_alloc_channel(const char *name, uint32_t cid, uint32_t type)
 {
 	struct smd_channel *ch;
 	struct smd_shared *shared;
+	spinlock_t *spintmp;
 
 	shared = smem_alloc(ID_SMD_CHANNELS + cid, sizeof(*shared));
 	if (!shared) {
@@ -683,6 +716,12 @@ static void smd_alloc_channel(const char *name, uint32_t cid, uint32_t type)
 	pr_info("smd_alloc_channel() '%s' cid=%d, shared=%p\n",
 		ch->name, ch->n, shared);
 
+	ch->chardev_major = register_chrdev(0, ch->name, &fops);
+	if (!(ch->chardev_major < 0)) {
+        spintmp = kmalloc(sizeof(*spintmp), GFP_KERNEL);
+		spin_lock_init(spintmp);
+		ch->chardev_buf = kfifo_alloc(SMD_BUF_SIZE * 1, GFP_KERNEL, spintmp);
+	}
 	mutex_lock(&smd_creation_mutex);
 	list_add(&ch->ch_list, &smd_ch_closed_list);
 	mutex_unlock(&smd_creation_mutex);
@@ -702,6 +741,28 @@ struct smd_channel *smd_get_channel(const char *name)
 	list_for_each_entry(ch, &smd_ch_closed_list, ch_list) {
 		if (!strcmp(name, ch->name)) {
 			list_del(&ch->ch_list);
+			mutex_unlock(&smd_creation_mutex);
+			return ch;
+		}
+	}
+	mutex_unlock(&smd_creation_mutex);
+
+	return NULL;
+}
+
+struct smd_channel *smd_find_channel(const char *name)
+{
+	struct smd_channel *ch;
+
+	mutex_lock(&smd_creation_mutex);
+	list_for_each_entry(ch, &smd_ch_list, ch_list) {
+		if (!strcmp(name, ch->name)) {
+			mutex_unlock(&smd_creation_mutex);
+			return ch;
+		}
+	}
+	list_for_each_entry(ch, &smd_ch_closed_list, ch_list) {
+		if (!strcmp(name, ch->name)) {
 			mutex_unlock(&smd_creation_mutex);
 			return ch;
 		}
@@ -1337,6 +1398,32 @@ static int __init msm_smd_init(void)
 {
 	return platform_driver_register(&msm_smd_driver);
 }
+
+static int msm_cellnet_open(struct inode *inode, struct file *file) {
+	return 0;
+}
+
+static int msm_cellnet_release(struct inode *inode, struct file *file) {
+	return 0;
+}
+
+static int msm_cellnet_read(struct file *file, char *buf, size_t len, loff_t *off) {
+	struct smd_channel *ch;
+	int bytesread;
+	ch = smd_find_channel(file->f_path.dentry->d_name.name);
+	if (ch == NULL) {
+		printk(KERN_ERR "smd_get_channel() could not find %s!\n",
+		       file->f_path.dentry->d_name.name);
+		return -1;
+	}
+	bytesread = kfifo_get(ch->chardev_buf, buf, len);
+	return bytesread;
+}
+
+static int msm_cellnet_write(struct file *file, const char *buf, size_t len, loff_t *off) {
+	return 0;
+}
+
 
 module_init(msm_smd_init);
 
