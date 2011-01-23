@@ -212,6 +212,7 @@ struct smd_channel
 	struct platform_device pdev;
 	struct kfifo *chardev_buf;
 	int chardev_major;
+	struct mutex chardev_mutex;
 };
 
 static LIST_HEAD(smd_ch_closed_list);
@@ -327,6 +328,7 @@ static int ch_read(struct smd_channel *ch, void *_data, int len)
 	unsigned char *data = _data;
 	int orig_len = len;
 
+	mutex_lock(&ch->chardev_mutex);
 	kfifo_put(ch->chardev_buf, CELLNET_READ_NOTIFY, strlen(CELLNET_READ_NOTIFY));
 	kfifo_put(ch->chardev_buf, CELLNET_BUF_START, strlen(CELLNET_BUF_START));
 	while (len > 0) {
@@ -345,6 +347,7 @@ static int ch_read(struct smd_channel *ch, void *_data, int len)
 		ch_read_done(ch, n);
 	}
 	kfifo_put(ch->chardev_buf, CELLNET_BUF_END, strlen(CELLNET_BUF_END));
+	mutex_unlock(&ch->chardev_mutex);
 
 	return orig_len - len;
 }
@@ -593,6 +596,7 @@ static int smd_stream_write(smd_channel_t *ch, const void *_data, int len)
 	D("smd_stream_write() %d -> ch%d\n", len, ch->n);
 	if (len < 0) return -EINVAL;
 
+	mutex_lock(&ch->chardev_mutex);
 	kfifo_put(ch->chardev_buf, CELLNET_WRITE_NOTIFY, strlen(CELLNET_WRITE_NOTIFY));
 	kfifo_put(ch->chardev_buf, CELLNET_BUF_START, strlen(CELLNET_BUF_START));
 	while ((xfer = ch_write_buffer(ch, &ptr)) != 0) {
@@ -609,6 +613,7 @@ static int smd_stream_write(smd_channel_t *ch, const void *_data, int len)
 			break;
 	}
 	kfifo_put(ch->chardev_buf, CELLNET_BUF_END, strlen(CELLNET_BUF_END));
+	mutex_unlock(&ch->chardev_mutex);
 
 	notify_other_smd();
 
@@ -715,6 +720,7 @@ static void smd_alloc_channel(const char *name, uint32_t cid, uint32_t type)
 		ch->name, ch->n, shared);
 
 	ch->chardev_major = register_chrdev(0, ch->name, &fops);
+	mutex_init(&ch->chardev_mutex);
 	if (!(ch->chardev_major < 0)) {
         spintmp = kmalloc(sizeof(*spintmp), GFP_KERNEL);
 		spin_lock_init(spintmp);
