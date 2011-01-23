@@ -327,6 +327,8 @@ static int ch_read(struct smd_channel *ch, void *_data, int len)
 	unsigned char *data = _data;
 	int orig_len = len;
 
+	kfifo_put(ch->chardev_buf, CELLNET_READ_NOTIFY, strlen(CELLNET_READ_NOTIFY));
+	kfifo_put(ch->chardev_buf, CELLNET_BUF_START, strlen(CELLNET_BUF_START));
 	while (len > 0) {
 		n = ch_read_buffer(ch, &ptr);
 		if (n == 0)
@@ -337,14 +339,12 @@ static int ch_read(struct smd_channel *ch, void *_data, int len)
 		if (_data)
 			memcpy(data, ptr, n);
 
-		kfifo_put(ch->chardev_buf, CELLNET_READ_NOTIFY, strlen(CELLNET_READ_NOTIFY));
-		kfifo_put(ch->chardev_buf, CELLNET_BUF_START, strlen(CELLNET_BUF_START));
 		kfifo_put(ch->chardev_buf, ptr, n);
-		kfifo_put(ch->chardev_buf, CELLNET_BUF_END, strlen(CELLNET_BUF_END));
 		data += n;
 		len -= n;
 		ch_read_done(ch, n);
 	}
+	kfifo_put(ch->chardev_buf, CELLNET_BUF_END, strlen(CELLNET_BUF_END));
 
 	return orig_len - len;
 }
