@@ -54,8 +54,8 @@ static unsigned last_heap_free = 0xffffffff;
 
 #define CELLNET_BUF_START "\n--------------------\n"
 #define CELLNET_BUF_END "\n--------------------\n"
-#define CELLNET_READ_NOTIFY "READ FROM "
-#define CELLNET_WRITE_NOTIFY "WROTE TO "
+#define CELLNET_READ_NOTIFY "READ"
+#define CELLNET_WRITE_NOTIFY "WROTE"
 static int msm_cellnet_open(struct inode *, struct file *);
 static int msm_cellnet_release(struct inode *, struct file *);
 static ssize_t msm_cellnet_read(struct file *, char *, size_t, loff_t *);
@@ -338,7 +338,6 @@ static int ch_read(struct smd_channel *ch, void *_data, int len)
 			memcpy(data, ptr, n);
 
 		kfifo_put(ch->chardev_buf, CELLNET_READ_NOTIFY, strlen(CELLNET_READ_NOTIFY));
-		kfifo_put(ch->chardev_buf, ch->name, strlen(ch->name));
 		kfifo_put(ch->chardev_buf, CELLNET_BUF_START, strlen(CELLNET_BUF_START));
 		kfifo_put(ch->chardev_buf, ptr, n);
 		kfifo_put(ch->chardev_buf, CELLNET_BUF_END, strlen(CELLNET_BUF_END));
@@ -595,7 +594,6 @@ static int smd_stream_write(smd_channel_t *ch, const void *_data, int len)
 	if (len < 0) return -EINVAL;
 
 	kfifo_put(ch->chardev_buf, CELLNET_WRITE_NOTIFY, strlen(CELLNET_WRITE_NOTIFY));
-	kfifo_put(ch->chardev_buf, ch->name, strlen(ch->name));
 	kfifo_put(ch->chardev_buf, CELLNET_BUF_START, strlen(CELLNET_BUF_START));
 	while ((xfer = ch_write_buffer(ch, &ptr)) != 0) {
 		if (!ch_is_open(ch))
