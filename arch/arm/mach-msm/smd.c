@@ -1420,7 +1420,9 @@ static int msm_cellnet_read(struct file *file, char *buf, size_t len, loff_t *of
 		       file->f_path.dentry->d_name.name);
 		return -1;
 	}
+	mutex_lock(&ch->chardev_mutex);
 	bytesread = kfifo_get(ch->chardev_buf, buf, len);
+	mutex_unlock(&ch->chardev_mutex);
 	return bytesread;
 }
 
